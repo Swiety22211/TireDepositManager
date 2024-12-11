@@ -297,7 +297,9 @@ def create_tables(conn):
             "size": "TEXT NOT NULL",
             "quantity": "INTEGER DEFAULT 0",
             "price": "REAL DEFAULT 0.0",
-            "dot": "TEXT"
+            "dot": "TEXT",
+            "notes": "TEXT DEFAULT ''",  # Dodanie kolumny 'notes'
+            "season_type": "TEXT DEFAULT 'Letnia'"  # Dodanie kolumny 'season_type'
         })
 
         # Zatwierdzenie zmian
@@ -470,7 +472,6 @@ try:
 
 finally:
     conn.close()
-
 
 
 class DepositManager(QMainWindow):
@@ -2154,9 +2155,11 @@ class OrderDialog(QDialog):
         self.layout = QVBoxLayout(self)
 
         self.form_layout = QFormLayout()
-        self.client_combo = QComboBox()
-        self.load_clients()
-        self.form_layout.addRow("Klient:", self.client_combo)
+        self.client_field = QLineEdit()
+        self.client_field.setPlaceholderText("Wpisz nazwę klienta...")
+        self.client_completer = QCompleter(self.get_client_names())
+        self.client_field.setCompleter(self.client_completer)
+        self.form_layout.addRow("Klient:", self.client_field)
         self.add_client_button = QPushButton("Dodaj nowego klienta")
         self.add_client_button.clicked.connect(self.add_client)
         self.form_layout.addRow("", self.add_client_button)
@@ -2180,12 +2183,13 @@ class OrderDialog(QDialog):
 
         self.layout.addLayout(self.form_layout)
 
+
         # Lista pozycji zamówienia
         self.items_label = QLabel("Pozycje zamówienia:")
         self.layout.addWidget(self.items_label)
         self.items_table = QTableWidget()
         self.items_table.setColumnCount(5)
-        self.items_table.setHorizontalHeaderLabels(["Marka opon", "Rozmiar opon", "Cena", "Ilość", "Razem"])
+        self.items_table.setHorizontalHeaderLabels(["Marka opon", "Rozmiar opon", "Cena /szt.", "Ilość", "Razem"])
         self.items_table.horizontalHeader().setStretchLastSection(True)
         self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.items_table.itemChanged.connect(self.update_totals)
@@ -2201,6 +2205,9 @@ class OrderDialog(QDialog):
         items_button_layout.addWidget(self.remove_item_button)
         self.layout.addLayout(items_button_layout)
 
+        # Dodanie domyślnej pozycji
+        self.add_item(default_values=["-", "-", "0", "0", "0.00"])
+
         # Przyciski
         self.button_layout = QHBoxLayout()
         self.save_button = QPushButton("Zapisz")
@@ -2214,50 +2221,77 @@ class OrderDialog(QDialog):
         if order_id:
             self.load_order_data()
 
-    def load_clients(self):
-        """Ładuje listę klientów do pola wyboru."""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT id, name FROM clients")
-        clients = cursor.fetchall()
-        self.client_combo.clear()
-        for client in clients:
-            self.client_combo.addItem(client[1], client[0])
+    def get_client_names(self):
+        """Pobiera listę nazw klientów z bazy danych."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT name FROM clients")
+            return [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Błąd podczas pobierania klientów: {e}")
+            return []
 
     def add_client(self):
-        """Dodaje nowego klienta."""
-        dialog = AddClientDialog(self.conn, parent=self)
-        if dialog.exec() == QDialog.Accepted:
-            self.load_clients()
-            index = self.client_combo.findText(dialog.client_name)
-            if index >= 0:
-                self.client_combo.setCurrentIndex(index)
+        """Otwiera okno dialogowe do dodawania nowego klienta."""
+        try:
+            dialog = AddClientDialog(self.conn, parent=self)
+            if dialog.exec() == QDialog.Accepted:
+                self.load_clients()
+        except Exception as e:
+            error_code = traceback.format_exc()
+            QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas dodawania klienta.\nKod błędu:\n{error_code}")
+            logger.error(f"Błąd podczas dodawania klienta: {e}")
 
-    def add_item(self):
-        """Dodaje nową pozycję do zamówienia."""
-        row_position = self.items_table.rowCount()
-        self.items_table.insertRow(row_position)
-        for col in range(5):  # Dodajemy puste komórki, "Razem" (kolumna 4) zostanie obliczone
-            item = QTableWidgetItem("")
-            if col == 2 or col == 3:  # Kolumny Cena i Ilość
-                item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self.items_table.setItem(row_position, col, item)
+    def add_item(self, default_values=None):
+        """Dodaje nowy wiersz do tabeli pozycji zamówienia."""
+        row_count = self.items_table.rowCount()
+        self.items_table.insertRow(row_count)
+
+        # Wartości domyślne dla nowego wiersza
+        default_values = default_values or ["", "", "0", "0", "0.00"]
+
+        for col in range(5):
+            item = QTableWidgetItem(default_values[col])
+            item.setFlags(item.flags() | Qt.ItemIsEditable)  # Ustaw edytowalność
+            self.items_table.setItem(row_count, col, item)
 
     def remove_item(self):
-        """Usuwa zaznaczoną pozycję z zamówienia."""
+        """Usuwa zaznaczony wiersz z tabeli pozycji zamówienia."""
         selected_row = self.items_table.currentRow()
         if selected_row >= 0:
             self.items_table.removeRow(selected_row)
+        else:
+            QMessageBox.warning(self, "Błąd", "Nie wybrano wiersza do usunięcia.")
 
     def update_totals(self):
-        """Aktualizuje kolumnę 'Razem'."""
+        """Aktualizuje kolumnę 'Razem' i całkowitą sumę zamówienia."""
+        self.items_table.blockSignals(True)  # Odłącz sygnały, aby zapobiec rekurencji
+        total = 0.0
         for row in range(self.items_table.rowCount()):
             try:
-                price = float(self.items_table.item(row, 2).text())
-                quantity = float(self.items_table.item(row, 3).text())
-                total = price * quantity
-                self.items_table.setItem(row, 4, QTableWidgetItem(f"{total:.2f}"))
-            except (ValueError, AttributeError):
-                self.items_table.setItem(row, 4, QTableWidgetItem(""))
+                # Pobierz komórki
+                price_item = self.items_table.item(row, 2)
+                quantity_item = self.items_table.item(row, 3)
+                
+                if price_item is None or quantity_item is None:
+                    continue  # Jeśli komórka jest pusta, pomiń
+                
+                # Konwersja wartości
+                price = float(price_item.text() or 0)
+                quantity = int(quantity_item.text() or 0)
+                total_price = price * quantity
+                
+                # Ustaw wartość w kolumnie 'Razem'
+                self.items_table.setItem(row, 4, QTableWidgetItem(f"{total_price:.2f}"))
+                total += total_price
+            except ValueError:
+                continue  # Ignoruj błędy konwersji
+
+        self.items_table.blockSignals(False)  # Ponownie podłącz sygnały
+        
+        # Aktualizuj sumę w etykiecie
+        self.items_label.setText(f"Pozycje zamówienia: (Suma: {total:.2f} PLN)")
+
 
     def load_order_data(self):
         """Ładuje dane zamówienia do formularza."""
@@ -2269,9 +2303,8 @@ class OrderDialog(QDialog):
         order = cursor.fetchone()
         if order:
             client_id = order[0]
-            index = self.client_combo.findData(client_id)
-            if index >= 0:
-                self.client_combo.setCurrentIndex(index)
+            client_name = cursor.execute("SELECT name FROM clients WHERE id = ?", (client_id,)).fetchone()[0]
+            self.client_field.setText(client_name)
             order_date = QDate.fromString(order[1], 'yyyy-MM-dd')
             self.order_date_input.setDate(order_date)
             expected_delivery_date = QDate.fromString(order[2], 'yyyy-MM-dd')
@@ -2294,13 +2327,23 @@ class OrderDialog(QDialog):
     def save_order(self):
         """Zapisuje zamówienie do bazy danych."""
         try:
-            client_id = self.client_combo.currentData()
+            client_name = self.client_field.text()
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT id FROM clients WHERE name = ?", (client_name,))
+            client = cursor.fetchone()
+            if client:
+                client_id = client[0]
+            else:
+                # Dodaj nowego klienta, jeśli nie istnieje
+                cursor.execute("INSERT INTO clients (name) VALUES (?)", (client_name,))
+                self.conn.commit()
+                client_id = cursor.lastrowid
+
             order_date = self.order_date_input.date().toString('yyyy-MM-dd')
             expected_delivery_date = self.expected_delivery_date_input.date().toString('yyyy-MM-dd')
             status = self.status_combo.currentText()
             notes = self.notes_input.toPlainText()
 
-            cursor = self.conn.cursor()
             if self.order_id:
                 cursor.execute('''
                     UPDATE orders
@@ -2334,6 +2377,8 @@ class OrderDialog(QDialog):
             logger.error(f"Błąd podczas zapisywania zamówienia: {e}")
 
 
+
+
 class InventoryItemDialog(QDialog):
     def __init__(self, conn, inventory_id=None, parent=None):
         super().__init__(parent)
@@ -2358,6 +2403,14 @@ class InventoryItemDialog(QDialog):
         self.dot_input = QLineEdit()
         self.form_layout.addRow("DOT:", self.dot_input)
 
+        self.season_type_combo = QComboBox()
+        self.season_type_combo.addItems(["Letnia", "Zimowa", "Wielosezonowa"])
+        self.form_layout.addRow("Typ sezonowy:", self.season_type_combo)
+
+        self.notes_input = QTextEdit()
+        self.notes_input.setPlaceholderText("Wprowadź dodatkowe uwagi...")
+        self.form_layout.addRow("Uwagi:", self.notes_input)
+
         self.layout.addLayout(self.form_layout)
 
         self.button_layout = QHBoxLayout()
@@ -2372,9 +2425,21 @@ class InventoryItemDialog(QDialog):
         if inventory_id:
             self.load_inventory_data()
 
+    def update_inventory_table(conn):
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(inventory)")
+        columns = [column[1] for column in cursor.fetchall()]
+        if "notes" not in columns:
+            cursor.execute("ALTER TABLE inventory ADD COLUMN notes TEXT DEFAULT ''")
+        if "season_type" not in columns:  # Dodaj inne brakujące kolumny, jeśli są potrzebne
+            cursor.execute("ALTER TABLE inventory ADD COLUMN season_type TEXT DEFAULT 'Letnia'")
+        conn.commit()
+
+        
+
     def load_inventory_data(self):
         cursor = self.conn.cursor()
-        cursor.execute("SELECT brand_model, size, quantity, price, dot FROM inventory WHERE id = ?", (self.inventory_id,))
+        cursor.execute("SELECT brand_model, size, quantity, price, dot, notes, season_type FROM inventory WHERE id = ?", (self.inventory_id,))
         item = cursor.fetchone()
         if item:
             self.brand_model_input.setText(item[0])
@@ -2382,6 +2447,12 @@ class InventoryItemDialog(QDialog):
             self.quantity_input.setText(str(item[2]))
             self.price_input.setText(str(item[3]))
             self.dot_input.setText(item[4])
+            self.notes_input.setPlainText(item[5] if len(item) > 5 and item[5] else "")
+            if len(item) > 6 and item[6]:
+                index = self.season_type_combo.findText(item[6])
+                if index >= 0:
+                    self.season_type_combo.setCurrentIndex(index)
+
 
     def update_inventory_table(conn):
         cursor = conn.cursor()
@@ -2389,8 +2460,11 @@ class InventoryItemDialog(QDialog):
         columns = [column[1] for column in cursor.fetchall()]
         if "brand_model" not in columns:
             cursor.execute("ALTER TABLE inventory ADD COLUMN brand_model TEXT NOT NULL DEFAULT ''")
+        if "notes" not in columns:
+            cursor.execute("ALTER TABLE inventory ADD COLUMN notes TEXT DEFAULT ''")
+        if "season_type" not in columns:
+            cursor.execute("ALTER TABLE inventory ADD COLUMN season_type TEXT DEFAULT 'Letnia'")
         conn.commit()
-
 
     def save_inventory(self):
         """Zapisuje oponę do tabeli inventory."""
@@ -2400,6 +2474,8 @@ class InventoryItemDialog(QDialog):
             quantity = self.quantity_input.text().strip()
             price = self.price_input.text().strip()
             dot = self.dot_input.text().strip()
+            notes = self.notes_input.toPlainText().strip()
+            season_type = self.season_type_combo.currentText()
 
             if not brand_model:
                 QMessageBox.warning(self, "Błąd", "Pole 'Marka i model' jest wymagane.")
@@ -2421,14 +2497,14 @@ class InventoryItemDialog(QDialog):
             if self.inventory_id:
                 cursor.execute('''
                     UPDATE inventory
-                    SET brand_model = ?, size = ?, quantity = ?, price = ?, dot = ?
+                    SET brand_model = ?, size = ?, quantity = ?, price = ?, dot = ?, notes = ?, season_type = ?
                     WHERE id = ?
-                ''', (brand_model, size, quantity, price, dot, self.inventory_id))
+                ''', (brand_model, size, quantity, price, dot, notes, season_type, self.inventory_id))
             else:
                 cursor.execute('''
-                    INSERT INTO inventory (brand_model, size, quantity, price, dot)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (brand_model, size, quantity, price, dot))
+                    INSERT INTO inventory (brand_model, size, quantity, price, dot, notes, season_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (brand_model, size, quantity, price, dot, notes, season_type))
             self.conn.commit()
 
             QMessageBox.information(self, "Sukces", "Opona została zapisana.")
@@ -2438,7 +2514,6 @@ class InventoryItemDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas zapisywania opony: {e}")
 
-
     def is_float(self, value):
         """Sprawdza, czy wartość jest liczbą zmiennoprzecinkową."""
         try:
@@ -2446,6 +2521,7 @@ class InventoryItemDialog(QDialog):
             return True
         except ValueError:
             return False
+
 
 
 
