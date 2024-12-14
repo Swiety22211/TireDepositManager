@@ -270,6 +270,15 @@ def create_tables(conn):
                 dot TEXT
             )
         ''')
+        # Tworzenie tabeli column_settings, jeśli nie istnieje
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS column_settings (
+                id INTEGER PRIMARY KEY,
+                tab_name TEXT NOT NULL,
+                column_index INTEGER NOT NULL,
+                visible BOOLEAN NOT NULL
+            )
+        ''')
 
         # Dodawanie brakujących kolumn do istniejących tabel
         def add_missing_columns(table, columns):
@@ -301,7 +310,20 @@ def create_tables(conn):
             "notes": "TEXT DEFAULT ''",  # Dodanie kolumny 'notes'
             "season_type": "TEXT DEFAULT 'Letnia'"  # Dodanie kolumny 'season_type'
         })
-
+        add_missing_columns("order_items", {
+            "tire_brand": "TEXT",
+            "tire_size": "TEXT",
+            "quantity": "INTEGER DEFAULT 0",
+            "price": "REAL DEFAULT 0.0",
+            "notes": "TEXT DEFAULT ''",
+        })
+        # Dodawanie brakujących kolumn
+        add_missing_columns("column_settings", {
+            "id": "INTEGER PRIMARY KEY",
+            "tab_name": "TEXT NOT NULL",
+            "column_index": "INTEGER NOT NULL",
+            "visible": "BOOLEAN NOT NULL DEFAULT 1"
+        })
         # Zatwierdzenie zmian
         conn.commit()
         logger.info("Tabele bazy danych zostały utworzone lub zaktualizowane.")
@@ -347,30 +369,41 @@ def resource_path(relative_path):
 
 # Funkcje generowania PDF
 def generate_pdf_label(deposit_id, client_name, tire_brand, tire_size, quantity, logo_path):
-    """Generuje etykietę PDF."""
+    """Generuje etykietę PDF z użyciem czcionki Arial oraz logo."""
     output_path = get_file_path(f"label_deposit_{deposit_id}.pdf")  # Tworzy plik w katalogu programu
     logger.info(f"Generowanie etykiety PDF w: {output_path}")
     
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A6
     from reportlab.lib.units import mm
-    
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import os
+
+    # Rejestracja czcionki Arial (upewnij się, że arial.ttf jest w katalogu)
+    try:
+        pdfmetrics.registerFont(TTFont('Arial', 'arial.ttf'))
+    except Exception as e:
+        logger.warning(f"Nie udało się załadować czcionki Arial: {e}")
+        logger.warning("Używanie czcionki domyślnej.")
+        # Jeśli nie można załadować Arial, będzie używana domyślna czcionka reportlab.
+
     c = canvas.Canvas(output_path, pagesize=A6)
     width, height = A6
 
-    # Dodanie logo
-    if os.path.exists(logo_path):
+    # Dodanie logo, jeśli istnieje
+    if logo_path and os.path.exists(logo_path):
         c.drawImage(logo_path, 10 * mm, height - 30 * mm, width=40 * mm, preserveAspectRatio=True, mask='auto')
     else:
-        c.setFont("Helvetica-Bold", 12)
+        c.setFont("Arial", 12)
         c.drawString(10 * mm, height - 20 * mm, "Logo nie znalezione")
 
     # Nagłówek
-    c.setFont("Helvetica-Bold", 14)
+    c.setFont("Arial", 14)
     c.drawCentredString(width / 2, height - 40 * mm, "Etykieta Depozytu")
 
     # Informacje o depozycie
-    c.setFont("Helvetica", 10)
+    c.setFont("Arial", 10)
     c.drawString(10 * mm, height - 50 * mm, f"ID Depozytu: {deposit_id}")
     c.drawString(10 * mm, height - 55 * mm, f"Klient: {client_name}")
     c.drawString(10 * mm, height - 60 * mm, f"Marka Opon: {tire_brand}")
@@ -383,39 +416,111 @@ def generate_pdf_label(deposit_id, client_name, tire_brand, tire_size, quantity,
     return output_path
 
 
-def generate_pdf_confirmation(deposit_id, client_name, deposit_details, logo_path):
-    """Generuje potwierdzenie PDF."""
-    output_path = get_file_path(f"confirmation_{deposit_id}.pdf")  # Tworzy plik w katalogu programu
+
+def generate_pdf_confirmation(deposit_id, client_name, deposit_details, logo_path, 
+                              company_name, company_address, company_contact):
+    """
+    Generuje potwierdzenie PDF z następującym układem:
+    - Lewy górny róg: logo
+    - Prawy górny róg: dane firmy
+    - Na środku (niżej): "Potwierdzenie Przyjęcia Depozytu" (pogrubione)
+    - Niżej: po lewej ID depozytu i Klient, po prawej "tabelka" z danymi pojazdu/opon
+    - Niżej na środku tekst "Dziękujemy bardzo za skorzystanie z naszych usług"
+    - Na dole linia pozioma i pod nią tekst "Wydrukowano w programie ... (nazwa i wersja)"
+    """
+
+    output_path = get_file_path(f"confirmation_{deposit_id}.pdf")
     logger.info(f"Generowanie potwierdzenia PDF w: {output_path}")
     
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import os
+
+    # Rejestracja czcionki Arial (upewnij się, że arial.ttf jest w tym samym katalogu)
+    try:
+        pdfmetrics.registerFont(TTFont('Arial', 'arial.ttf'))
+        font_name = "Arial"
+    except Exception as e:
+        logger.warning(f"Nie udało się załadować czcionki Arial: {e}")
+        logger.warning("Używanie czcionki domyślnej (Helvetica).")
+        font_name = "Helvetica"
 
     c = canvas.Canvas(output_path, pagesize=A4)
     width, height = A4
 
-    # Dodanie logo
-    if os.path.exists(logo_path):
-        c.drawImage(logo_path, 10 * mm, height - 30 * mm, width=60 * mm, preserveAspectRatio=True, mask='auto')
+    # Ustawienia czcionek i odstępów
+    header_font_size = 16
+    normal_font_size = 12
+    bold_font_size = 14
+
+    # Wstawienie logo w lewy górny róg
+    # Załóżmy logo szerokości ok. 30 mm
+    logo_width_mm = 30
+    logo_height_mm = 30
+    top_margin = 20 * mm
+
+    if logo_path and os.path.exists(logo_path):
+        c.drawImage(logo_path, 10 * mm, height - top_margin - logo_height_mm,
+                    width=logo_width_mm * mm, preserveAspectRatio=True, mask='auto')
     else:
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(10 * mm, height - 20 * mm, "Logo nie znalezione")
+        c.setFont(font_name, normal_font_size)
+        c.drawString(10 * mm, height - top_margin, "Logo nie znalezione")
 
-    # Nagłówek
-    c.setFont("Helvetica-Bold", 16)
-    c.drawCentredString(width / 2, height - 40 * mm, "Potwierdzenie Przyjęcia Depozytu")
+    # Dane firmy w prawym górnym rogu
+    # Zacznijmy od prawego górnego rogu, przesuwając się w lewo o ~80mm i w dół o niewielką ilość
+    company_data_x = width - 80 * mm
+    company_data_y = height - top_margin
 
-    # Informacje o depozycie
-    c.setFont("Helvetica", 12)
-    c.drawString(10 * mm, height - 60 * mm, f"ID Depozytu: {deposit_id}")
-    c.drawString(10 * mm, height - 70 * mm, f"Klient: {client_name}")
-    for i, detail in enumerate(deposit_details, start=1):
-        c.drawString(10 * mm, height - (80 + i * 10) * mm, detail)
+    c.setFont(font_name, normal_font_size)
+    line_height = 5 * mm
+
+    # Wyświetlamy dane firmy: nazwa, adres, kontakt
+    c.drawRightString(width - 10 * mm, company_data_y, company_name)
+    company_data_y -= line_height
+    c.drawRightString(width - 10 * mm, company_data_y, company_address)
+    company_data_y -= line_height
+    c.drawRightString(width - 10 * mm, company_data_y, company_contact)
+
+    # Nagłówek - Potwierdzenie Przyjęcia Depozytu
+    c.setFont(font_name, header_font_size)
+    header_y = height - 60 * mm
+    c.drawCentredString(width / 2, header_y, "Potwierdzenie Przyjęcia Depozytu")
+
+    # Informacje o depozycie po lewej stronie
+    c.setFont(font_name, normal_font_size)
+    left_info_x = 10 * mm
+    left_info_start_y = header_y - 20 * mm
+
+    c.drawString(left_info_x, left_info_start_y, f"ID Depozytu: {deposit_id}")
+    c.drawString(left_info_x, left_info_start_y - line_height, f"Klient: {client_name}")
+
+    # Dane depozytu po prawej stronie (pseudo-tabela)
+    # Zakładamy, że deposit_details to list ["Model Auta: ...", "Nr Rejestracyjny: ...", ...]
+    right_info_x = width / 2 + 20 * mm
+    right_info_start_y = left_info_start_y
+    for i, detail in enumerate(deposit_details):
+        c.drawString(right_info_x, right_info_start_y - i * line_height, detail)
+
+    # Tekst "Dziękujemy..." na środku, poniżej danych
+    thanks_y = left_info_start_y - 60 * mm
+    c.drawCentredString(width / 2, thanks_y, "Dziękujemy bardzo za skorzystanie z naszych usług")
+
+    # Linia na dole
+    bottom_line_y = 20 * mm
+    c.line(10 * mm, bottom_line_y, width - 10 * mm, bottom_line_y)
+
+    # Pod linią tekst z informacją o programie
+    c.setFont(font_name, 10)
+    c.drawCentredString(width / 2, bottom_line_y - 5 * mm, f"Wydrukowano w programie Menadżer Depozytów Opon / Serwis Opon MATEO")
 
     c.save()
     logger.info(f"Potwierdzenie PDF wygenerowane: {output_path}")
     return output_path
+
+
 
 
 
@@ -473,6 +578,286 @@ try:
 finally:
     conn.close()
 
+from niimprint.printer import PrinterClient
+from niimprint import SerialTransport
+from PIL import Image, ImageDraw, ImageFont
+from niimbot_integration import NiimbotPrinterManager  # Import menedżera drukarki
+
+
+logger = logging.getLogger("TireDepositManager")
+
+
+class NiimbotPrinterManager:
+    def __init__(self, db_path, settings):
+        self.conn = sqlite3.connect(db_path)
+        self.settings = settings if settings else {}  # Domyślnie pusty słownik, jeśli brak ustawień
+
+    def print_label_with_niimbot(self, file_path, serial_port='COM3'):
+        """Drukuje etykietę za pomocą drukarki Niimbot."""
+        try:
+            logger.info(f"Łączenie z drukarką na porcie: {serial_port}")
+            transport = SerialTransport(port=serial_port)
+            client = PrinterClient(transport)
+
+            logger.info(f"Wczytywanie obrazu: {file_path}")
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Plik obrazu nie istnieje: {file_path}")
+
+            image = Image.open(file_path)
+
+            # Obrót obrazu, aby pasował do orientacji drukarki
+            image = image.rotate(-90, expand=True)
+            logger.info(f"Wymiary obrazu po obrocie: {image.size}")
+
+            # Upewnij się, że obraz jest w trybie zgodnym z drukarką
+            # (np. konwersja do 1-bit jeżeli drukarka tego wymaga, tu pozostaje jak jest)
+            client.set_dimension(image.width, image.height)
+            client.print_image(image)
+            client.end_print()
+
+            QMessageBox.information(None, "Sukces", "Etykieta została wydrukowana na drukarce Niimbot.")
+        except Exception as e:
+            logger.error(f"Błąd podczas drukowania etykiety Niimbot: {e}")
+            QMessageBox.critical(None, "Błąd", f"Wystąpił błąd podczas drukowania etykiety Niimbot:\n{e}")
+
+    def generate_label_image(
+        self,
+        client_name,
+        phone_number,
+        car_model,
+        registration_number,
+        tire_model,
+        tire_size,
+        quantity,
+        output_file="label.png",
+        width=640,
+        height=384
+    ):
+        """Generuje obraz etykiety z tekstem w poziomie."""
+        try:
+            # Upewniamy się, że zmienne nie są None
+            client_name = client_name or ""
+            phone_number = phone_number or ""
+            car_model = car_model or ""
+            registration_number = registration_number or ""
+            tire_model = tire_model or ""
+            tire_size = tire_size or ""
+            quantity = quantity if quantity is not None else 0
+
+            image = Image.new("RGB", (width, height), "white")
+            draw = ImageDraw.Draw(image)
+
+            font_path = "arial.ttf"
+            try:
+                large_font = ImageFont.truetype(font_path, 80)
+                medium_font = ImageFont.truetype(font_path, 40)
+                small_font = ImageFont.truetype(font_path, 30)
+            except IOError:
+                logger.warning("Nie udało się załadować czcionki TrueType. Używanie czcionki domyślnej.")
+                large_font = medium_font = small_font = ImageFont.load_default()
+
+            x_margin = 20
+            y_offset = 5
+            line_spacing = 40
+
+            draw.text((x_margin, y_offset), f"Klient: {client_name}", fill="black", font=medium_font)
+            y_offset += line_spacing
+            draw.text((x_margin, y_offset), f"Telefon: {phone_number}", fill="black", font=medium_font)
+            y_offset += line_spacing
+            draw.text((x_margin, y_offset), f"Marka: {car_model}", fill="black", font=medium_font)
+            y_offset += line_spacing + 20
+
+            # Bezpieczne obliczanie długości tekstu - sprawdzamy czy registration_number nie jest pusty
+            reg_text_length = draw.textlength(registration_number, font=large_font) if registration_number else 0
+            reg_number_x = (width - reg_text_length) // 2
+            draw.text((reg_number_x, y_offset), registration_number, fill="black", font=large_font)
+            y_offset += line_spacing + 50
+
+            draw.text((x_margin, y_offset), f"Model opony: {tire_model}", fill="black", font=small_font)
+            y_offset += line_spacing
+            draw.text((x_margin, y_offset), f"Rozmiar opony: {tire_size}", fill="black", font=small_font)
+            y_offset += line_spacing
+            draw.text((x_margin, y_offset), f"Ilość: {quantity}", fill="black", font=small_font)
+
+            image.save(output_file)
+            logger.info(f"Etykieta wygenerowana jako {output_file}")
+            return output_file
+        except Exception as e:
+            logger.error(f"Błąd podczas generowania obrazu etykiety: {e}")
+            raise
+
+    def generate_tire_label(
+        self,
+        brand_model,
+        size,
+        dot,
+        output_file="tire_label.png",
+        width=640,
+        height=384
+    ):
+        """
+        Generuje obraz etykiety dla opon na stanie.
+
+        :param brand_model: Model opony (string lub None).
+        :param size: Rozmiar opony (string lub None).
+        :param dot: Kod DOT opony (string lub None).
+        :param output_file: Ścieżka do pliku wyjściowego.
+        :param width: Szerokość obrazu w pikselach.
+        :param height: Wysokość obrazu w pikselach.
+        """
+        try:
+            # Zamiana wartości None na pusty string, aby uniknąć błędów podczas rysowania tekstu
+            brand_model = brand_model or ""
+            size = size or ""
+            dot = dot or ""
+
+            image = Image.new("RGB", (width, height), "white")
+            draw = ImageDraw.Draw(image)
+
+            font_path = "arial.ttf"
+            try:
+                large_font = ImageFont.truetype(font_path, 50)  # Duży rozmiar czcionki
+                medium_font = ImageFont.truetype(font_path, 70) # Średni rozmiar czcionki
+                small_font = ImageFont.truetype(font_path, 20)  # Mały rozmiar czcionki
+            except IOError:
+                logger.warning("Nie udało się załadować czcionki TrueType. Używanie czcionki domyślnej.")
+                large_font = medium_font = small_font = ImageFont.load_default()
+
+            # Dodaj logo z ustawień (jeśli istnieje)
+            logo_path = self.settings.get("company_logo", None)
+            if logo_path and os.path.exists(logo_path):
+                logo = Image.open(logo_path)
+                logo.thumbnail((200, 200))  # Skalowanie logo
+                image.paste(logo, (10, 10))  # Wstawienie logo w lewy górny róg
+
+            # Dodaj DOT w prawym górnym rogu, jeśli dot nie jest pusty
+            if dot.strip():
+                dot_length = draw.textlength(dot, font=small_font)
+                dot_x = width - dot_length - 10
+                draw.text((dot_x, 10), dot, fill="black", font=small_font)
+
+            # Dodaj model opony (duża czcionka)
+            y_offset = 120  # Start poniżej logo
+            draw.text((30, y_offset), brand_model, fill="black", font=large_font)
+
+            # Dodaj rozmiar opony (średnia czcionka)
+            y_offset += 70  # Odstęp poniżej modelu
+            draw.text((30, y_offset), size, fill="black", font=medium_font)
+
+            # Zapisz obraz
+            image.save(output_file)
+            logger.info(f"Etykieta wygenerowana jako {output_file}")
+            logger.info(f"Wygenerowany obraz ma wymiary: {image.size}")
+            return output_file
+        except Exception as e:
+            logger.error(f"Błąd podczas generowania obrazu etykiety: {e}")
+            raise
+
+
+    def show_preview_and_print(
+        self,
+        use_label_image=False,  # False = użyj generate_tire_label, True = użyj generate_label_image
+        serial_port='COM3',
+        # Dane do etykiety A:
+        client_name=None,
+        phone_number=None,
+        car_model=None,
+        registration_number=None,
+        tire_model=None,
+        tire_size=None,
+        quantity=None,
+        # Dane do etykiety B:
+        brand_model=None,
+        size=None,
+        dot=None
+    ):
+        """Wyświetla okno podglądu etykiety z opcją drukowania wielu kopii.
+        
+        use_label_image = True -> generuje etykietę A (zakładka A)
+        use_label_image = False -> generuje etykietę B (zakładka B)
+        """
+        try:
+            if use_label_image:
+                # Jesteśmy w zakładce A, używamy generate_label_image
+                preview_file = self.generate_label_image(
+                    client_name=client_name,
+                    phone_number=phone_number,
+                    car_model=car_model,
+                    registration_number=registration_number,
+                    tire_model=tire_model,
+                    tire_size=tire_size,
+                    quantity=quantity
+                )
+            else:
+                # Jesteśmy w zakładce B, używamy generate_tire_label
+                preview_file = self.generate_tire_label(
+                    brand_model=brand_model,
+                    size=size,
+                    dot=dot
+                )
+
+            class PreviewDialog(QDialog):
+                def __init__(self, image_path, print_callback, parent=None):
+                    super().__init__(parent)
+                    self.setWindowTitle("Podgląd etykiety")
+                    self.layout = QVBoxLayout()
+
+                    self.image_label = QLabel()
+                    if os.path.exists(image_path):
+                        self.image_label.setPixmap(QPixmap(image_path))
+                    else:
+                        self.image_label.setText("Nie udało się wczytać podglądu etykiety.")
+                    self.layout.addWidget(self.image_label)
+
+                    self.copy_label = QLabel("Liczba kopii:")
+                    self.layout.addWidget(self.copy_label)
+                    self.copy_input = QLineEdit()
+                    self.copy_input.setPlaceholderText("1")
+                    self.layout.addWidget(self.copy_input)
+
+                    self.print_button = QPushButton("Drukuj")
+                    self.cancel_button = QPushButton("Anuluj")
+
+                    self.print_button.clicked.connect(lambda: print_callback(self.copy_input.text()))
+                    self.cancel_button.clicked.connect(self.reject)
+
+                    self.layout.addWidget(self.print_button)
+                    self.layout.addWidget(self.cancel_button)
+                    self.setLayout(self.layout)
+
+            def print_action(copies):
+                try:
+                    # Przy druku generujemy ponownie plik (może być identyczny)
+                    if use_label_image:
+                        print_file = self.generate_label_image(
+                            client_name=client_name,
+                            phone_number=phone_number,
+                            car_model=car_model,
+                            registration_number=registration_number,
+                            tire_model=tire_model,
+                            tire_size=tire_size,
+                            quantity=quantity
+                        )
+                    else:
+                        print_file = self.generate_tire_label(
+                            brand_model=brand_model,
+                            size=size,
+                            dot=dot
+                        )
+
+                    num_copies = int(copies) if copies.isdigit() and int(copies) > 0 else 1
+                    for _ in range(num_copies):
+                        self.print_label_with_niimbot(print_file, serial_port)
+                except Exception as e:
+                    logger.error(f"Błąd podczas drukowania: {e}")
+                    QMessageBox.critical(None, "Błąd", f"Wystąpił błąd podczas drukowania:\n{e}")
+
+            dialog = PreviewDialog(preview_file, print_action)
+            dialog.exec()
+
+        except Exception as e:
+            logger.error(f"Błąd podczas wyświetlania podglądu etykiety: {e}")
+            QMessageBox.critical(None, "Błąd", f"Wystąpił błąd podczas wyświetlania podglądu etykiety:\n{e}")
 
 class DepositManager(QMainWindow):
     def __init__(self):
@@ -480,21 +865,33 @@ class DepositManager(QMainWindow):
         self.setWindowTitle("Menadżer Depozytów Opon")
         self.setWindowIcon(QIcon("icon.ico"))  # Ścieżka do ikony
         self.setGeometry(100, 100, 1200, 800)
-        self.conn = create_connection()
-        create_tables(self.conn)
+
+        # Ścieżka bazowa aplikacji
+        self.base_path = os.path.abspath(os.path.dirname(__file__))
+
+        # Ścieżki do zasobów
+        self.data_dir = os.path.join(self.base_path, "Dane")
+        self.db_path = os.path.join(self.data_dir, "tire_deposits.db")
+        self.logo_path = os.path.join(self.base_path, "logo.png")
+
+        # Tworzenie katalogu danych, jeśli nie istnieje
+        os.makedirs(self.data_dir, exist_ok=True)
 
         # Połączenie z bazą danych
         self.conn = create_connection()
         if self.conn is None:
             QMessageBox.critical(self, "Błąd", "Nie można nawiązać połączenia z bazą danych.")
-            sys.exit(1)  # Zakończ aplikację, jeśli baza danych nie działa
+            sys.exit(1)
+
+        # Tworzenie tabel w bazie danych
+        create_tables(self.conn)
 
         # Inicjalizacja atrybutów domyślnych
         self.backup_folder = 'backups'
         self.company_name = ''
         self.company_address = ''
         self.company_contact = ''
-        self.company_logo = ''
+        self.company_logo = self.logo_path if os.path.exists(self.logo_path) else ''
         self.default_location = ''
         self.auto_print = False
         self.email_settings = {
@@ -510,7 +907,15 @@ class DepositManager(QMainWindow):
         # Główny widget i układ
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
+
+        # Główny układ
         self.main_layout = QVBoxLayout(self.main_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)  # Marginesy
+        self.main_layout.setSpacing(5)  # Odstępy między widgetami
+
+        # Pasek menu
+        self.menu_bar = self.menuBar()
+        self.init_menus()
 
         # Pole do skanowania kodów kreskowych
         self.barcode_input = QLineEdit()
@@ -518,58 +923,142 @@ class DepositManager(QMainWindow):
         self.barcode_input.returnPressed.connect(self.handle_barcode_scanned)
         self.main_layout.addWidget(self.barcode_input)
 
-
-        # Pasek menu
-        self.menu_bar = self.menuBar()
-        self.init_menus()
-
-        # Zakładki
+        # Zakładki główne
         self.tabs = QTabWidget()
+        self.main_layout.addWidget(self.tabs)
+
+        # Grupa zakładek "Depozyty"
+        self.deposit_tabs = QTabWidget()
+        self.deposit_tabs.setTabPosition(QTabWidget.West)
         self.active_tab = QWidget()
         self.issued_tab = QWidget()
         self.overdue_tab = QWidget()
+        self.deposit_tabs.addTab(self.active_tab, "Depozyty aktywne")
+        self.deposit_tabs.addTab(self.issued_tab, "Depozyty wydane")
+        self.deposit_tabs.addTab(self.overdue_tab, "Depozyty przeterminowane")
+
+        self.tabs.addTab(self.deposit_tabs, "Depozyty")  # Dodanie grupy zakładek
+
+        # Pozostałe zakładki
         self.clients_tab = QWidget()
+        self.orders_tab = QWidget()
         self.stats_tab = QWidget()
+        self.inventory_tab = QWidget()
         self.admin_tab = QWidget()
-        self.orders_tab = QWidget()  # Nowa zakładka Zamówienia
-        self.tabs.addTab(self.active_tab, "Depozyty aktywne")
-        self.tabs.addTab(self.issued_tab, "Depozyty wydane")
-        self.tabs.addTab(self.overdue_tab, "Depozyty przeterminowane")
         self.tabs.addTab(self.clients_tab, "Klienci")
-        self.tabs.addTab(self.orders_tab, "Zamówienia")  # Dodaj zakładkę Zamówienia
-        self.tabs.addTab(self.stats_tab, "Statystyki")
+        self.tabs.addTab(self.orders_tab, "Zamówienia")
         self.tabs.addTab(self.admin_tab, "Administracja")
-        self.main_layout.addWidget(self.tabs)
+        self.tabs.addTab(self.stats_tab, "Statystyki")
 
         # Inicjalizacja zakładek
         self.init_active_tab()
         self.init_issued_tab()
         self.init_overdue_tab()
         self.init_clients_tab()
-        self.init_orders_tab()  # Inicjalizacja zakładki Zamówienia
+        self.init_orders_tab()
         self.init_stats_tab()
         self.init_inventory_tab()
+
+        # Ustaw menu kontekstowe dla tabel
+        self.setup_context_menus()
 
         # Ładowanie danych
         self.load_active_deposits()
         self.load_issued_deposits()
         self.load_overdue_deposits()
         self.load_clients()
-        self.load_orders()  # Ładowanie zamówień
+        self.load_orders()
         self.load_statistics()
 
         # Timer do aktualizacji czasu trwania depozytów
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_deposit_durations)
-        self.timer.start(60000)  # Aktualizacja co minutę
+        self.timer.start(60000)
 
         # Timer do wysyłania przypomnień
         self.reminder_timer = QTimer()
         self.reminder_timer.timeout.connect(self.check_and_send_reminders)
-        self.reminder_timer.start(86400000)  # Sprawdzanie co 24 godziny
+        self.reminder_timer.start(86400000)
 
         # Ustawienia okna
         self.load_window_settings()
+
+        # Ustawienia dla drukarki Niimbot
+        settings = {
+            "company_logo": self.company_logo
+        }
+
+        # Inicjalizacja drukarki Niimbot
+        self.printer_manager = NiimbotPrinterManager(db_path=self.db_path, settings=settings)
+
+
+    def init_tabs(self):
+        """Inicjalizuje strukturę zakładek aplikacji."""
+
+        # Główne zakładki
+        self.tabs = QTabWidget()
+        self.main_layout.addWidget(self.tabs)
+
+        # Zgrupowane zakładki
+        self.grouped_tabs = QTabWidget()  # Zagnieżdżony QTabWidget dla zgrupowanych zakładek
+
+        # Używamy istniejących zakładek:
+        self.grouped_tabs.addTab(self.active_tab, "Depozyty aktywne")
+        self.grouped_tabs.addTab(self.issued_tab, "Depozyty wydane")
+        self.grouped_tabs.addTab(self.overdue_tab, "Depozyty przeterminowane")
+
+        # Dodanie zgrupowanych zakładek do głównego QTabWidget
+        self.tabs.addTab(self.grouped_tabs, "Depozyty")
+
+        # Pozostałe indywidualne zakładki
+        self.tabs.addTab(self.clients_tab, "Klienci")
+        self.tabs.addTab(self.orders_tab, "Zamówienia")  # Dodaj zakładkę Zamówienia
+        self.tabs.addTab(self.inventory_tab, "Opony na stanie")  # Dodaj zakładkę Opony na stanie
+        self.tabs.addTab(self.stats_tab, "Statystyki")
+        self.tabs.addTab(self.admin_tab, "Administracja")
+
+    def ensure_column_settings(self):
+        """Upewnia się, że tabela 'column_settings' jest poprawnie zainicjalizowana."""
+        try:
+            cursor = self.conn.cursor()
+
+            # Sprawdź, czy tabela jest pusta
+            cursor.execute("SELECT COUNT(*) FROM column_settings")
+            if cursor.fetchone()[0] == 0:
+                # Dodaj domyślne ustawienia kolumn dla każdej zakładki
+                default_columns = {
+                    "active_deposits": [("ID", 1), ("Klient", 1), ("Telefon", 1), ("Status", 1)],
+                    "issued_deposits": [("ID", 1), ("Data wydania", 1), ("Cena", 1)],
+                    "clients": [("ID", 1), ("Nazwa", 1), ("Telefon", 1), ("E-mail", 1)],
+                }
+
+                for tab_name, columns in default_columns.items():
+                    for idx, (column_name, visible) in enumerate(columns):
+                        cursor.execute('''
+                            INSERT INTO column_settings (tab_name, column_index, visible)
+                            VALUES (?, ?, ?)
+                        ''', (tab_name, idx, visible))
+
+                self.conn.commit()
+                logger.info("Tabela 'column_settings' została zainicjalizowana.")
+        except sqlite3.Error as e:
+            logger.error(f"Błąd podczas inicjalizacji tabeli 'column_settings': {e}")
+            QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas inicjalizacji tabeli 'column_settings': {e}")
+
+    def setup_context_menus(self):
+        """Ustawienie menu kontekstowego dla wszystkich tabel w zakładkach."""
+        # Aktywne depozyty
+        self.table_active.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_active.customContextMenuRequested.connect(self.open_context_menu_active)
+
+        # Wydane depozyty
+        self.table_issued.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_issued.customContextMenuRequested.connect(self.open_context_menu_issued)
+
+        # Przeterminowane depozyty
+        self.table_overdue.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_overdue.customContextMenuRequested.connect(self.open_context_menu_overdue)
+
 
     def init_menus(self):
         # Menu Plik
@@ -617,16 +1106,32 @@ class DepositManager(QMainWindow):
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
+    def closeEvent(self, event):
+        """Zapisuje ustawienia okna przy zamykaniu."""
+        settings = QSettings("TireDepositManager", "MainWindow")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("windowState", self.saveState())
+        super().closeEvent(event)
+
     def init_active_tab(self):
         """Inicjalizuje zakładkę z aktywnymi depozytami."""
         layout = QVBoxLayout()
         self.active_tab.setLayout(layout)
 
-        # Pasek wyszukiwania
+        # Pasek wyszukiwania i guziczek zarządzania kolumnami
+        search_layout = QHBoxLayout()
         self.search_bar_active = QLineEdit()
         self.search_bar_active.setPlaceholderText("Szukaj depozytów...")
         self.search_bar_active.textChanged.connect(self.load_active_deposits)
-        layout.addWidget(self.search_bar_active)
+        search_layout.addWidget(self.search_bar_active)
+
+        # Dodanie guzika zarządzania kolumnami
+        manage_columns_button = QPushButton("Zarządzaj kolumnami")
+        manage_columns_button.setFixedWidth(150)
+        manage_columns_button.clicked.connect(self.manage_active_columns)
+        search_layout.addWidget(manage_columns_button, alignment=Qt.AlignRight)
+
+        layout.addLayout(search_layout)
 
         # Tabela depozytów
         self.table_active = QTableWidget()
@@ -637,18 +1142,44 @@ class DepositManager(QMainWindow):
         ])
         self.table_active.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table_active.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table_active.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table_active.customContextMenuRequested.connect(self.open_context_menu_active)
         self.table_active.horizontalHeader().setStretchLastSection(True)
         self.table_active.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table_active)
 
-        # Przyciski
+        # Przyciski pod tabelą
         button_layout = QHBoxLayout()
         self.add_button = QPushButton("Dodaj depozyt")
         self.add_button.clicked.connect(self.add_deposit)
         button_layout.addWidget(self.add_button)
         layout.addLayout(button_layout)
+
+        # Wczytanie widocznych kolumn
+        self.load_visible_columns()
+        
+        # Ustawienie menu kontekstowego dla tabeli
+        self.table_active.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_active.customContextMenuRequested.connect(self.open_context_menu_active)
+
+
+    def manage_active_columns(self):
+        """Otwiera okno dialogowe zarządzania widocznymi kolumnami dla aktywnych depozytów."""
+        dialog = ColumnManagerDialog(self.table_active, self.conn, "active_tab_columns", parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            self.load_visible_columns()
+
+
+    def load_visible_columns(self):
+        """Wczytuje widoczne kolumny dla tabeli aktywnych depozytów."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT column_index, visible FROM column_settings WHERE tab_name = 'active_tab_columns'")
+            column_settings = cursor.fetchall()
+
+            for column_index, visible in column_settings:
+                self.table_active.setColumnHidden(column_index, not visible)
+        except sqlite3.Error as e:
+            logger.error(f"Błąd podczas wczytywania widocznych kolumn: {e}")
+
 
     def init_issued_tab(self):
         """Inicjalizuje zakładkę z wydanymi depozytami."""
@@ -933,32 +1464,43 @@ class DepositManager(QMainWindow):
     def load_inventory(self):
         """Ładuje dane o oponach na stanie do tabeli w zakładce 'Opony na stanie'."""
         try:
+            search_text = self.search_bar_inventory.text().strip()
             cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT id, brand_model, size, quantity, price, dot
-                FROM inventory
-            ''')
+
+            if search_text:
+                query = '''
+                    SELECT id, brand_model, size, quantity, price, dot, notes
+                    FROM inventory
+                    WHERE brand_model LIKE ? OR size LIKE ? OR dot LIKE ?
+                '''
+                parameters = (f'%{search_text}%', f'%{search_text}%', f'%{search_text}%')
+            else:
+                query = '''
+                    SELECT id, brand_model, size, quantity, price, dot, notes
+                    FROM inventory
+                '''
+                parameters = ()
+
+            cursor.execute(query, parameters)
             rows = cursor.fetchall()
 
             self.table_inventory.setRowCount(0)  # Wyczyszczenie tabeli przed załadowaniem nowych danych
 
             for row_idx, row_data in enumerate(rows):
                 self.table_inventory.insertRow(row_idx)
-
                 # Wstawiamy dane w odpowiedniej kolejności
                 self.table_inventory.setItem(row_idx, 0, QTableWidgetItem(str(row_data[0])))  # ID
                 self.table_inventory.setItem(row_idx, 1, QTableWidgetItem(row_data[1]))       # Marka i model
                 self.table_inventory.setItem(row_idx, 2, QTableWidgetItem(row_data[2]))       # Rozmiar
-                self.table_inventory.setItem(row_idx, 5, QTableWidgetItem(str(row_data[4])))  # Cena
-                self.table_inventory.setItem(row_idx, 4, QTableWidgetItem(row_data[5]))       # DOT
                 self.table_inventory.setItem(row_idx, 3, QTableWidgetItem(str(row_data[3])))  # Ilość
+                self.table_inventory.setItem(row_idx, 4, QTableWidgetItem(row_data[5]))       # DOT
+                self.table_inventory.setItem(row_idx, 5, QTableWidgetItem(str(row_data[4])))  # Cena
+                self.table_inventory.setItem(row_idx, 6, QTableWidgetItem(row_data[6] or "")) # Uwagi (jeśli brak danych, wstaw pusty ciąg znaków)
 
-            logger.info("Dane opon na stanie zostały załadowane.")
+            logger.info("Dane opon na stanie zostały załadowane (z uwzględnieniem wyszukiwania).")
         except Exception as e:
             logger.error(f"Błąd podczas ładowania danych opon na stanie: {e}")
             QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas ładowania danych:\n{e}")
-
-
 
 
     def open_context_menu_inventory(self, position):
@@ -971,7 +1513,7 @@ class DepositManager(QMainWindow):
         # Pobranie ID opony z tabeli (zakładamy, że ID jest w pierwszej kolumnie)
         tire_id_item = self.table_inventory.item(selected_row, 0)
         if tire_id_item and tire_id_item.text().isdigit():
-            tire_id = int(tire_id_item.text())  # Przekształcenie ID na liczbę
+            tire_id = int(tire_id_item.text())
         else:
             QMessageBox.warning(self, "Błąd", "Nie udało się pobrać ID opony.")
             return
@@ -997,6 +1539,37 @@ class DepositManager(QMainWindow):
 
         # Wyświetlenie menu kontekstowego
         menu.exec(self.table_inventory.viewport().mapToGlobal(position))
+
+
+    def print_inventory_item_label(self, tire_id):
+        """Pobiera dane o oponie z bazy i wywołuje podgląd oraz drukowanie etykiety (generate_tire_label)."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT brand_model, size, dot
+                FROM inventory
+                WHERE id = ?
+            ''', (tire_id,))
+            result = cursor.fetchone()
+
+            if result:
+                brand_model, size, dot = result
+                logger.info("Generowanie podglądu i drukowanie etykiety dla opony...")
+
+                # Wywołanie show_preview_and_print z use_label_image=False,
+                # co oznacza użycie generate_tire_label
+                self.printer_manager.show_preview_and_print(
+                    use_label_image=False,
+                    brand_model=brand_model,
+                    size=size,
+                    dot=dot,
+                    serial_port="COM3"
+                )
+            else:
+                QMessageBox.warning(self, "Błąd", "Nie znaleziono danych dla wybranej opony.")
+        except Exception as e:
+            logger.error(f"Błąd podczas przygotowywania etykiety do druku: {e}")
+            QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas przygotowywania etykiety:\n{e}")
 
 
 
@@ -1026,23 +1599,6 @@ class DepositManager(QMainWindow):
 
 
 
-    def print_inventory_item_label(self, tire_id):
-        """Drukuje etykietę dla wybranej opony."""
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT brand_model, size, quantity, price, dot
-            FROM inventory WHERE id = ?
-        ''', (tire_id,))
-        item = cursor.fetchone()
-
-        if item:
-            brand_model, size, quantity, price, dot = item
-            label_content = f"Marka i model: {brand_model}\nRozmiar: {size}\nIlość: {quantity}\nCena: {price:.2f}\nDOT: {dot}"
-
-            # Drukowanie (prosty przykład)
-            QMessageBox.information(self, "Drukowanie", f"Drukowanie etykiety:\n\n{label_content}")
-        else:
-            QMessageBox.warning(self, "Błąd", "Nie znaleziono opony w bazie danych.")
 
 
 
@@ -1240,13 +1796,13 @@ class DepositManager(QMainWindow):
             edit_action = QAction("Edytuj depozyt", self)
             delete_action = QAction("Usuń depozyt", self)
             issue_action = QAction("Oznacz jako wydany", self)
-            generate_label_action = QAction("Generuj etykietę", self)
+            generate_and_print_label_action = QAction("Generuj i Drukuj Etykietę", self)
             print_confirmation_action = QAction("Drukuj potwierdzenie", self)
             view_details_action = QAction("Pokaż szczegóły", self)
             send_email_action = QAction("Wyślij e-mail", self)
             menu.addAction(edit_action)
             menu.addAction(issue_action)
-            menu.addAction(generate_label_action)
+            menu.addAction(generate_and_print_label_action)
             menu.addAction(print_confirmation_action)
             menu.addAction(view_details_action)
             menu.addAction(send_email_action)
@@ -1264,8 +1820,8 @@ class DepositManager(QMainWindow):
                 self.delete_deposit(deposit_id)
             elif action == issue_action:
                 self.mark_as_issued(deposit_id)
-            elif action == generate_label_action:
-                self.generate_label(deposit_id)
+            elif action == generate_and_print_label_action:
+                self.generate_and_print_label(deposit_id)
             elif action == print_confirmation_action:
                 self.print_confirmation(deposit_id)
             elif action == view_details_action:
@@ -1277,6 +1833,64 @@ class DepositManager(QMainWindow):
             error_code = traceback.format_exc()
             QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas obsługi menu kontekstowego.\nKod błędu:\n{error_code}")
             logger.error(f"Błąd podczas obsługi menu kontekstowego: {e}")
+
+
+    def generate_and_print_label(self, deposit_id):
+        """Generuje i drukuje etykietę dla wybranego depozytu, używając generate_label_image."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT deposits.id, clients.name, clients.phone_number, deposits.car_model,
+                    deposits.registration_number, deposits.tire_brand, deposits.tire_size, deposits.quantity
+                FROM deposits
+                INNER JOIN clients ON deposits.client_id = clients.id
+                WHERE deposits.id = ?
+            ''', (deposit_id,))
+            result = cursor.fetchone()
+
+            if result:
+                (deposit_id, client_name, phone_number, car_model,
+                registration_number, tire_brand, tire_size, quantity) = result
+
+                logger.info("Generowanie i drukowanie etykiety (A) ...")
+                
+                # Generowanie obrazu etykiety za pomocą generate_label_image (podgląd)
+                output_file = self.printer_manager.generate_label_image(
+                    client_name=client_name,
+                    phone_number=phone_number,
+                    car_model=car_model,
+                    registration_number=registration_number,
+                    tire_model=tire_brand,
+                    tire_size=tire_size,
+                    quantity=quantity,
+                    output_file="label.png",
+                )
+                
+                # Sprawdzenie rozmiaru wygenerowanego obrazu
+                image = Image.open(output_file)
+                logger.info(f"Wygenerowany obraz ma wymiary: {image.size}")
+
+                # Wyświetlenie podglądu i drukowanie z use_label_image=True, aby show_preview_and_print
+                # wiedziało, że ma użyć generate_label_image
+                self.printer_manager.show_preview_and_print(
+                    use_label_image=True,
+                    client_name=client_name,
+                    phone_number=phone_number,
+                    car_model=car_model,
+                    registration_number=registration_number,
+                    tire_model=tire_brand,
+                    tire_size=tire_size,
+                    quantity=quantity,
+                    serial_port="COM3"
+                )
+
+            else:
+                QMessageBox.warning(self, "Błąd", "Nie znaleziono danych dla tego depozytu.")
+        except Exception as e:
+            logger.error(f"Błąd podczas generowania etykiety: {e}")
+            QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas generowania etykiety:\n{e}")
+
+
 
     def open_context_menu_issued(self, position):
         """Obsługuje menu kontekstowe dla tabeli wydanych depozytów."""
@@ -1564,6 +2178,8 @@ class DepositManager(QMainWindow):
             if result:
                 deposit_id, client_name, car_model, registration_number, tire_brand, tire_size, quantity, deposit_date = result
                 logo_path = get_file_path("logo.png")
+
+                # Tutaj przekazujemy brakujące argumenty: company_name, company_address, company_contact, 
                 output_path = generate_pdf_confirmation(
                     deposit_id,
                     client_name,
@@ -1575,8 +2191,12 @@ class DepositManager(QMainWindow):
                         f"Ilość: {quantity}",
                         f"Data Przyjęcia: {deposit_date}",
                     ],
-                    logo_path
+                    logo_path,
+                    self.company_name,
+                    self.company_address,
+                    self.company_contact,
                 )
+
 
                 message_box = QMessageBox(self)
                 message_box.setWindowTitle("Potwierdzenie wygenerowane")
@@ -2143,6 +2763,61 @@ class DepositManager(QMainWindow):
         except Exception as e:
             logger.error(f"Błąd podczas wyświetlania szczegółów depozytu: {e}")
 
+class ColumnManagerDialog(QDialog):
+    """Dialog do zarządzania widocznymi kolumnami."""
+    def __init__(self, table, conn, tab_name, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Zarządzaj kolumnami")
+        self.table = table
+        self.conn = conn
+        self.tab_name = tab_name
+        self.layout = QVBoxLayout(self)
+
+        self.checkbox_layout = QVBoxLayout()
+        self.checkboxes = []
+
+        # Pobieranie nazw kolumn
+        column_count = self.table.columnCount()
+        for col in range(column_count):
+            checkbox = QCheckBox(self.table.horizontalHeaderItem(col).text())
+            checkbox.setChecked(not self.table.isColumnHidden(col))
+            self.checkboxes.append((col, checkbox))
+            self.checkbox_layout.addWidget(checkbox)
+
+        self.layout.addLayout(self.checkbox_layout)
+
+        # Przyciski
+        button_layout = QHBoxLayout()
+        save_button = QPushButton("Zapisz")
+        save_button.clicked.connect(self.save_column_settings)
+        cancel_button = QPushButton("Anuluj")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(save_button)
+        button_layout.addWidget(cancel_button)
+        self.layout.addLayout(button_layout)
+
+    def save_column_settings(self):
+        """Zapisuje ustawienia widoczności kolumn w bazie danych."""
+        try:
+            cursor = self.conn.cursor()
+
+            # Usuń poprzednie ustawienia
+            cursor.execute("DELETE FROM column_settings WHERE tab_name = ?", (self.tab_name,))
+
+            # Zapisz nowe ustawienia
+            for col, checkbox in self.checkboxes:
+                cursor.execute(
+                    "INSERT INTO column_settings (tab_name, column_index, visible) VALUES (?, ?, ?)",
+                    (self.tab_name, col, checkbox.isChecked())
+                )
+
+            self.conn.commit()
+            QMessageBox.information(self, "Sukces", "Ustawienia kolumn zostały zapisane.")
+            self.accept()
+        except sqlite3.Error as e:
+            QMessageBox.critical(self, "Błąd", f"Błąd podczas zapisywania ustawień kolumn:\n{e}")
+
+
 class OrderDialog(QDialog):
     """Dialog do dodawania i edycji zamówień."""
     def __init__(self, conn, order_id=None, parent=None):
@@ -2150,20 +2825,30 @@ class OrderDialog(QDialog):
         self.conn = conn
         self.order_id = order_id
         self.setWindowTitle("Dodaj zamówienie" if order_id is None else "Edytuj zamówienie")
-        self.resize(800, 600)  # Powiększenie rozmiaru okna
+        self.resize(800, 600)
 
         self.layout = QVBoxLayout(self)
 
         self.form_layout = QFormLayout()
+
+        # Pole tekstowe dla klienta z funkcją autouzupełniania
         self.client_field = QLineEdit()
         self.client_field.setPlaceholderText("Wpisz nazwę klienta...")
         self.client_completer = QCompleter(self.get_client_names())
         self.client_field.setCompleter(self.client_completer)
+        self.client_field.textChanged.connect(self.update_client_phone)  # Aktualizuj numer telefonu po zmianie
         self.form_layout.addRow("Klient:", self.client_field)
+
+        # Pole dla numeru telefonu (readonly)
+        self.phone_label = QLabel("Numer telefonu: -")  # Domyślnie puste
+        self.form_layout.addRow("", self.phone_label)
+
+        # Dodaj klienta
         self.add_client_button = QPushButton("Dodaj nowego klienta")
         self.add_client_button.clicked.connect(self.add_client)
         self.form_layout.addRow("", self.add_client_button)
 
+        # Pozostałe pola
         self.order_date_input = QDateEdit()
         self.order_date_input.setCalendarPopup(True)
         self.order_date_input.setDate(QDate.currentDate())
@@ -2171,7 +2856,7 @@ class OrderDialog(QDialog):
 
         self.expected_delivery_date_input = QDateEdit()
         self.expected_delivery_date_input.setCalendarPopup(True)
-        self.expected_delivery_date_input.setDate(QDate.currentDate().addDays(1))  # 1 dzień roboczy
+        self.expected_delivery_date_input.setDate(QDate.currentDate().addDays(1))
         self.form_layout.addRow("Oczekiwana dostawa:", self.expected_delivery_date_input)
 
         self.status_combo = QComboBox()
@@ -2183,8 +2868,7 @@ class OrderDialog(QDialog):
 
         self.layout.addLayout(self.form_layout)
 
-
-        # Lista pozycji zamówienia
+        # Tabela pozycji zamówienia
         self.items_label = QLabel("Pozycje zamówienia:")
         self.layout.addWidget(self.items_label)
         self.items_table = QTableWidget()
@@ -2231,12 +2915,27 @@ class OrderDialog(QDialog):
             logger.error(f"Błąd podczas pobierania klientów: {e}")
             return []
 
+    def update_client_phone(self):
+        """Aktualizuje numer telefonu na podstawie wybranego klienta."""
+        client_name = self.client_field.text()
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT phone_number FROM clients WHERE name = ?", (client_name,))
+            result = cursor.fetchone()
+            if result:
+                self.phone_label.setText(f"Numer telefonu: {result[0]}")
+            else:
+                self.phone_label.setText("Numer telefonu: -")
+        except Exception as e:
+            logger.error(f"Błąd podczas aktualizacji numeru telefonu: {e}")
+            self.phone_label.setText("Numer telefonu: -")
+
     def add_client(self):
         """Otwiera okno dialogowe do dodawania nowego klienta."""
         try:
             dialog = AddClientDialog(self.conn, parent=self)
             if dialog.exec() == QDialog.Accepted:
-                self.load_clients()
+                self.client_completer.model().setStringList(self.get_client_names())
         except Exception as e:
             error_code = traceback.format_exc()
             QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas dodawania klienta.\nKod błędu:\n{error_code}")
@@ -2273,20 +2972,22 @@ class OrderDialog(QDialog):
                 price_item = self.items_table.item(row, 2)
                 quantity_item = self.items_table.item(row, 3)
                 
+                # Sprawdź, czy komórki istnieją
                 if price_item is None or quantity_item is None:
                     continue  # Jeśli komórka jest pusta, pomiń
                 
-                # Konwersja wartości
+                # Pobierz tekst z komórek i konwertuj na liczby
                 price = float(price_item.text() or 0)
                 quantity = int(quantity_item.text() or 0)
                 total_price = price * quantity
                 
                 # Ustaw wartość w kolumnie 'Razem'
-                self.items_table.setItem(row, 4, QTableWidgetItem(f"{total_price:.2f}"))
+                total_item = QTableWidgetItem(f"{total_price:.2f}")
+                total_item.setFlags(total_item.flags() & ~Qt.ItemIsEditable)  # Zablokuj edycję
+                self.items_table.setItem(row, 4, total_item)
                 total += total_price
             except ValueError:
                 continue  # Ignoruj błędy konwersji
-
         self.items_table.blockSignals(False)  # Ponownie podłącz sygnały
         
         # Aktualizuj sumę w etykiecie
@@ -2312,7 +3013,6 @@ class OrderDialog(QDialog):
             self.status_combo.setCurrentText(order[3])
             self.notes_input.setPlainText(order[4])
 
-            # Ładuj pozycje zamówienia
             cursor.execute('''
                 SELECT tire_brand, tire_size, price, quantity
                 FROM order_items WHERE order_id = ?
@@ -2334,7 +3034,6 @@ class OrderDialog(QDialog):
             if client:
                 client_id = client[0]
             else:
-                # Dodaj nowego klienta, jeśli nie istnieje
                 cursor.execute("INSERT INTO clients (name) VALUES (?)", (client_name,))
                 self.conn.commit()
                 client_id = cursor.lastrowid
@@ -2357,7 +3056,6 @@ class OrderDialog(QDialog):
                 ''', (client_id, order_date, expected_delivery_date, status, notes))
                 self.order_id = cursor.lastrowid
 
-            # Zapisz pozycje zamówienia
             cursor.execute("DELETE FROM order_items WHERE order_id = ?", (self.order_id,))
             for row in range(self.items_table.rowCount()):
                 tire_brand = self.items_table.item(row, 0).text()
@@ -2372,9 +3070,9 @@ class OrderDialog(QDialog):
             self.conn.commit()
             self.accept()
         except Exception as e:
-            error_code = traceback.format_exc()
-            QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas zapisywania zamówienia.\nKod błędu:\n{error_code}")
+            QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas zapisywania zamówienia: {e}")
             logger.error(f"Błąd podczas zapisywania zamówienia: {e}")
+
 
 
 
@@ -2536,6 +3234,8 @@ class OrderDetailsDialog(QDialog):
         self.conn = conn
         self.order_id = order_id
         self.setWindowTitle("Szczegóły Zamówienia")
+        self.resize(800, 600)
+
         self.layout = QVBoxLayout(self)
 
         # Pobierz dane zamówienia
@@ -2547,6 +3247,7 @@ class OrderDetailsDialog(QDialog):
             WHERE orders.id = ?
         ''', (self.order_id,))
         order = cursor.fetchone()
+
         if order:
             order_info = {
                 'ID': order[0],
@@ -2558,32 +3259,46 @@ class OrderDetailsDialog(QDialog):
                 'Status': order[4],
                 'Uwagi': order[5]
             }
+
             # Wyświetl dane w formularzu
             form_layout = QFormLayout()
             for key, value in order_info.items():
                 form_layout.addRow(QLabel(f"<b>{key}:</b>"), QLabel(str(value)))
             self.layout.addLayout(form_layout)
 
-            # Wyświetl pozycje zamówienia
+            # Tabela pozycji zamówienia
             self.items_label = QLabel("Pozycje zamówienia:")
             self.layout.addWidget(self.items_label)
             self.items_table = QTableWidget()
-            self.items_table.setColumnCount(4)
-            self.items_table.setHorizontalHeaderLabels(["Marka opon", "Rozmiar opon", "Ilość", "Cena"])
-            self.items_table.setEditTriggers(QTableWidget.NoEditTriggers)
+            self.items_table.setColumnCount(5)
+            self.items_table.setHorizontalHeaderLabels(["Marka opon", "Rozmiar opon", "Cena /szt.", "Ilość", "Razem"])
             self.items_table.horizontalHeader().setStretchLastSection(True)
             self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self.items_table.setEditTriggers(QTableWidget.NoEditTriggers)  # Zablokuj edycję
             self.layout.addWidget(self.items_table)
 
+            # Załaduj pozycje zamówienia
             cursor.execute('''
-                SELECT tire_brand, size, quantity, price
+                SELECT tire_brand, tire_size, price, quantity
                 FROM order_items WHERE order_id = ?
             ''', (self.order_id,))
             items = cursor.fetchall()
+
             self.items_table.setRowCount(len(items))
+            total = 0.0
             for row_idx, item in enumerate(items):
                 for col_idx, value in enumerate(item):
                     self.items_table.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
+                # Oblicz wartość "Razem" i podsumowanie
+                price = float(item[2])
+                quantity = int(item[3])
+                total_price = price * quantity
+                self.items_table.setItem(row_idx, 4, QTableWidgetItem(f"{total_price:.2f}"))
+                total += total_price
+
+            # Wyświetl sumę zamówienia
+            self.total_label = QLabel(f"<b>Łączna kwota zamówienia: {total:.2f} PLN</b>")
+            self.layout.addWidget(self.total_label)
 
             # Przyciski
             button_layout = QHBoxLayout()
@@ -2594,6 +3309,7 @@ class OrderDetailsDialog(QDialog):
         else:
             QMessageBox.warning(self, "Błąd", "Nie znaleziono danych zamówienia.")
             self.close()
+
 
 class DepositDialog(QDialog):
     def __init__(self, conn, deposit_id=None, default_location='', parent=None):
